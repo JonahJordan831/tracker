@@ -1,0 +1,107 @@
+from machine import Pin, I2C
+from time import sleep
+import math
+
+# I2C on GP18 (SDA) and GP19 (SCL)
+i2c = I2C(1, scl=Pin(19), sda=Pin(18), freq=400000)
+
+# I2C addresses from your scan
+LSM6DSL_ADDR = 0x6A   # accel + gyro
+LIS3MDL_ADDR = 0x1C   # magnetometer (BerryIMUv3)
+
+# LSM6DSL registers
+CTRL1_XL   = 0x10
+CTRL2_G    = 0x11
+OUTX_L_XL  = 0x28
+
+# LIS3MDL registers
+CTRL_REG1  = 0x20
+CTRL_REG2  = 0x21
+CTRL_REG3  = 0x22
+OUTX_L_M   = 0x28
+
+# ---------- Configure sensors ----------
+
+# Enable accel (104 Hz, ±4g) and gyro (104 Hz, 245 dps)
+i2c.writeto_mem(LSM6DSL_ADDR, CTRL1_XL, bytes([0b01001000]))
+i2c.writeto_mem(LSM6DSL_ADDR, CTRL2_G,  bytes([0b01000000]))
+
+# LIS3MDL: enable magnetometer, continuous‑conversion mode
+# 0x70: Ultra‑high‑performance, ODR ~10 Hz
+i2c.writeto_mem(LIS3MDL_ADDR, CTRL_REG1, bytes([0x70]))
+# 0x00: ±4 gauss full scale
+i2c.writeto_mem(LIS3MDL_ADDR, CTRL_REG2, bytes([0x00]))
+# 0x00: continuous‑conversion mode
+i2c.writeto_mem(LIS3MDL_ADDR, CTRL_REG3, bytes([0x00]))
+
+def twos_comp16(lo, hi):
+    v = (hi << 8) | lo
+    if v & 0x8000:
+        v -= 65536
+    return v
+
+def read_accel():
+    data = i2c.readfrom_mem(LSM6DSL_ADDR, OUTX_L_XL, 6)
+    ax = twos_comp16(data[0], data[1])
+    ay = twos_comp16(data[2], data[3])
+    az = twos_comp16(data[4], data[5])
+    return ax, ay, az
+
+def read_mag():
+    data = i2c.readfrom_mem(LIS3MDL_ADDR, OUTX_L_M, 6)
+    mx = twos_comp16(data[0], data[1])
+    my = twos_comp16(data[2], data[3])
+    mz = twos_comp16(data[4], data[5])
+    return mx, my, mz
+
+# Simple hard‑iron offsets for magnetometer (start at zero; tune later)
+MX_OFF = 0
+MY_OFF = 0
+MZ_OFF = 0
+
+while True:
+    # --- Accelerometer ---
+    ax_raw, ay_raw, az_raw = read_accel()
+
+    # scale to g for ±4g: 0.122 mg/LSB ≈ 0.000122 g/LSB
+    ax_g = ax_raw * 0.000122
+    ay_g = ay_raw * 0.000122
+    az_g = az_raw * 0.000122
+
+    # --- Magnetometer ---
+    mx_raw, my_raw, mz_raw = read_mag()
+    mx = mx_raw - MX_OFF
+    my = my_raw - MY_OFF
+    mz = mz_raw - MZ_OFF
+
+    # --- Compute roll, pitch from accel ---
+    roll  = math.degrees(math.atan2(ay_g, az_g))
+    pitch = math.degrees(math.atan2(-ax_g, math.sqrt(ay_g*ay_g + az_g*az_g)))
+
+    # --- Compute yaw (heading) from mag + tilt compensation ---
+    # Convert to radians for math
+    r = math.radians(roll)
+    p = math.radians(pitch)
+
+    # Tilt‑compensated mag (rough)
+    mx_comp = mx * math.cos(p) + mz * math.sin(p)
+    my_comp = mx * math.sin(r) * math.sin(p) + my * math.cos(r) - mz * math.sin(r) * math.cos(p)
+
+    yaw = math.degrees(math.atan2(-my_comp, mx_comp))  # heading in degrees
+    # Normalize yaw to [-180, 180]
+    if yaw > 180:
+        yaw -= 360
+    elif yaw < -180:
+        yaw += 360
+
+    # Debug line: XYZ in g, mag, and angles
+    print("AX={:.3f}g AY={:.3f}g AZ={:.3f}g  "
+          "MX={} MY={} MZ={}  R={:.2f} P={:.2f} Y={:.2f}".format(
+              ax_g, ay_g, az_g, mx_raw, my_raw, mz_raw, roll, pitch, yaw))
+
+    # CSV line for browser: roll,pitch,yaw
+    print("{:.2f},{:.2f},{:.2f}".format(roll, pitch, yaw))
+
+    sleep(0.05)
+
+
